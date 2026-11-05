@@ -1,24 +1,20 @@
 # Case 06497416: OpenGL GLSL mix() incorrect-output reproducer
 
-## Current status
+## Overview
 
-A standalone test reproduces expression-dependent incorrect color output on the tested Intel configurations.
-The literal and inline-clamped interpolation weights fail, while helper-function and uniform weights produce
-the expected color. The original Minecraft-shader harness also has a passing NVIDIA RTX 4060 comparison.
-A reduced shader reproduces the failure on the tested Intel MTL iGPU with GLSL 3.30 and GLSL 4.60.
+This C++17 / GLEW / GLFW test investigates expression-dependent incorrect output from a global GLSL
+`mix()` initializer. The current source filename is `repro.cpp` (previously `repro_simple_output.cpp`).
+Use `repro.cpp` in build commands and project references.
 
-The observed standalone failure is incorrect finite RGB values. No NaNs or infinities were recorded in the
-submitted runs. This reproduces the expression-dependent color defect, not the original Minecraft NaN
-propagation symptom. The precise driver/compiler root cause has not been established.
+Intel device naming used in this document:
 
-This README describes `repro_simple_output.cpp`, the simplified-reporting revision. It supersedes the older
-three-panel, macro-switched reproduction description. The latest reporting revision was generated but has
-not yet been independently compiled/executed in the evidence accompanying this README. The result tables
-below come from the earlier CSV-producing harness runs, not newly executed tests of this revision.
+Intel Graphics, Intel Arc A-series A, Intel Arc B-series, Intel Arc B390
 
-## What is being tested
+These are documentation labels, not a claim that every device or driver in each series was tested.
 
-The minimal fragment shader contains these global initializers:
+## Test behavior
+
+The minimal fragment shader initializes:
 
 ```glsl
 vec3 fireSpecialLightColor = vec3(0.6f, 0.3f, 2.4f) * 3.8f;
@@ -26,16 +22,12 @@ vec3 torchBlockSpecialLightColor =
     mix(vec3(2.0f, 0.87f, 0.27f), fireSpecialLightColor, 0.75f);
 ```
 
-It directly writes `vec4(torchBlockSpecialLightColor, 1.0f)` to render target 0.
-Expected RGBA, allowing floating-point rounding:
+It directly outputs `vec4(torchBlockSpecialLightColor, 1.0f)`.
+Expected RGBA is approximately `(2.21, 1.0725, 6.9075, 1.0)`.
 
-```text
-(2.21, 1.0725, 6.9075, 1.0)
-```
+Four separate fragment programs test equivalent interpolation weights:
 
-Four fragment programs are compiled separately:
-
-| Variant | Weight expression |
+| Variant | Weight |
 |---|---|
 | literal | `0.75f` |
 | inline | `clamp(0.75f, 0.0f, 1.0f)` |
@@ -43,60 +35,58 @@ Four fragment programs are compiled separately:
 | uniform | `reproWeight`, initialized and explicitly set to `0.75f` |
 
 The helper is `float clamp01(float x) { return clamp(x, 0.0f, 1.0f); }`.
-These weights represent the same value for this test. The globals intentionally are not changed to `const`.
-There is no runtime switch choosing the variant inside a shared fragment shader.
+The minimal vertex shader generates a fullscreen triangle with no Minecraft-specific outputs.
+The minimal fragment shader has no textures, lighting, material selection, or smoothstep calls.
+Some legacy host setup remains but is unused by the supplied minimal shader.
 
-The vertex shader only generates a fullscreen triangle using `gl_VertexID`. It provides no Minecraft inputs.
-The fragment test contains no texture lookups, lighting calculations, material selection, or `smoothstep()`.
-The host retains some legacy setup functions/resources, but the minimal fragment shader does not access them.
-The host reads floating-point output without converting it to display colors.
-
-## Observed results and scope
-
-Hardware identities below were supplied by the tester. Exact driver versions should be taken from the
-matching run's report/environment evidence; they are not inferred from these CSV files.
+## Results collected
 
 ### Earlier full Minecraft-shader harness
 
-The following outcomes describe the direct initializer probe within that harness. The full lighting path
-also showed expression-dependent torch-color differences on the Intel runs.
-
-| Device | Literal | Inline clamp | Helper | Uniform |
+| Recorded device, using updated labels | Literal | Inline | Helper | Uniform |
 |---|---|---|---|---|
-| Intel MTL iGPU | Incorrect | Incorrect | Expected | Expected |
-| Intel Arc A770 | Incorrect | Incorrect | Expected | Expected |
-| B390 (tester-provided device label) | Incorrect | Incorrect | Expected | Expected |
+| Intel Graphics (original integrated-graphics run) | Incorrect | Incorrect | Expected | Expected |
+| Intel Arc A-series A (A770 run) | Incorrect | Incorrect | Expected | Expected |
+| Intel Arc B390 (tester-provided B390 run label) | Incorrect | Incorrect | Expected | Expected |
 | NVIDIA RTX 4060 | Expected | Expected | Expected | Expected |
 
-### Reduced fragment + minimal vertex shader, MTL iGPU
+Intel Arc B-series is included in the requested device naming, but no separate additional B-series run
+beyond the supplied B390-labeled evidence is asserted here.
 
-| Fragment language version | Literal | Inline clamp | Helper | Uniform |
+These outcomes describe the direct initializer probes. The Intel full-lighting tests also showed
+expression-dependent differences in the torch output.
+
+### Reduced shader program
+
+The original integrated-graphics configuration, labeled Intel Graphics here, reproduced the same pattern
+with the minimal fragment and minimal vertex shaders:
+
+| Fragment version | Literal | Inline | Helper | Uniform |
 |---|---|---|---|---|
 | GLSL 3.30 | Incorrect | Incorrect | Expected | Expected |
 | GLSL 4.60 | Incorrect | Incorrect | Expected | Expected |
 
-In these minimal-program runs, literal/inline RGB was approximately `(0.75, 0, 0)` rather than the expected
-color. The tiny nonzero channels varied between runs. Do not use their exact incorrect values as a required
-failure signature. Earlier tests also produced very large finite values.
+The failing RGB was approximately `(0.75, 0, 0)` in these reduced-program runs. Other runs produced large
+finite incorrect values. Exact incorrect values are not a required signature.
+No NaNs or infinities were recorded in the supplied runs. This demonstrates incorrect finite output,
+not the original Minecraft NaN-propagation symptom. A particular compiler root cause is not confirmed.
 
-The minimal shader has not yet been demonstrated on A770, B390 or RTX 4060 in the supplied evidence.
-Do not extend the full-shader results to the reduced shader without running it on those devices.
-Changing to GLSL 4.60 did not remove the failure in the tested MTL configuration; this is not a claim about
-all drivers or all GPUs.
+The reduced-program result is not automatically extended to all device labels listed above. Additional
+minimal-shader runs are required for those configurations. Preserve exact renderer strings with each run.
+The collected results predate the simplified-reporting revision; no new execution of that revision is
+claimed by this README.
 
-## Build on Windows using CL
+## Build with CL
 
-Requirements: MSVC C++ tools, Windows SDK, x64 GLEW and GLFW libraries, and a working OpenGL 4.6 driver.
-Use the x64 Native Tools Command Prompt for Visual Studio. No CMake or Python is required.
-
-For vcpkg dynamic libraries:
+Open an x64 Native Tools Command Prompt for Visual Studio. Use x64 GLEW/GLFW DLL libraries.
+No Python or CMake is required.
 
 ```bat
 set "DEPS=C:\path\to\vcpkg\installed\x64-windows"
 
 cl /nologo /std:c++17 /EHsc /W4 /O2 /MD /fp:precise /DGLFW_DLL ^
   /I"%DEPS%\include" ^
-  repro_simple_output.cpp ^
+  repro.cpp ^
   /Fe:mix_repro_simple.exe ^
   /link /LIBPATH:"%DEPS%\lib" ^
   glew32.lib glfw3dll.lib opengl32.lib
@@ -104,155 +94,123 @@ cl /nologo /std:c++17 /EHsc /W4 /O2 /MD /fp:precise /DGLFW_DLL ^
 set "PATH=%DEPS%\bin;%PATH%"
 ```
 
-Replace the dependency path. Alternatively, put the matching `glew32.dll` and `glfw3.dll` beside the executable.
-Do not define `GLEW_STATIC` when linking `glew32.lib` as a DLL import library.
-Do not enable `/fp:fast`; host-side NaN/Inf checks must remain reliable.
+Replace the dependency path. Alternatively, place the matching `glew32.dll` and `glfw3.dll` beside the EXE.
+Do not define GLEW_STATIC for this DLL configuration. Do not use `/fp:fast`.
+The executable name remains `mix_repro_simple.exe`; the source filename is `repro.cpp`.
 
 ## Run
 
 Use a fresh output directory for each configuration:
 
 ```bat
-mix_repro_simple.exe --shader minimal330.frag --out results_mtl_330
-mix_repro_simple.exe --shader minimal460.frag --out results_mtl_460
+mix_repro_simple.exe --shader minimal330.frag --out results_intel_330
+mix_repro_simple.exe --shader minimal460.frag --out results_intel_460
 ```
 
-The current C++ requests an OpenGL 4.6 core context. Its embedded minimal vertex shader declares GLSL 3.30.
-The selected fragment file declares GLSL 3.30 or 4.60. The GLSL 4.60 fragment run therefore does not imply
-that both shader stages were changed to GLSL 4.60. Inspect the saved source files for the exact declarations.
-If a matched-version vertex/fragment experiment is needed, change the embedded vertex declaration separately
-and preserve that executable/source with the results.
+The current host requests OpenGL 4.6 core and embeds a minimal GLSL 3.30 vertex shader. The selected fragment
+file determines the fragment version. A 4.60 fragment run does not imply both stages use GLSL 4.60.
+Inspect `vertex.vert` and the generated fragment source to identify the actual declarations.
 
-Default render dimensions: 128 x 128. Example override:
+Default dimensions are 128 x 128. Use `--size 256` to change them.
+Only `--mode full` is supported and it is the default. Here it means execute the supplied minimal fragment
+entry point, not Minecraft lighting. The default input filename is `minimal330.frag`.
+`--visible` shows the context window but provides no rendered comparison preview.
+Legacy material/frame/time flags remain accepted but do not influence the supplied minimal shader.
 
-```bat
-mix_repro_simple.exe --shader minimal460.frag --size 256 --out results_mtl_460_256
-```
+## Numerical validation
 
-`--mode full` is the only supported mode in this reporting revision and is the default. Here, `full` means
-execute the supplied minimal fragment entry point unchanged; it does not mean execute Minecraft lighting.
-The fragment path is relative to the working directory unless an absolute path is supplied.
-The hidden window requires usable desktop/display support. `--visible` shows the context window but does
-not provide a rendered preview or an interactive comparison UI.
-
-Legacy flags such as `--material`, `--frame`, `--sun-angle` and `--time` remain accepted but do not influence
-the supplied minimal fragment shader because it does not read those inputs.
-
-## How PASS/FAIL is determined
-
-The code checks every pixel of render target 0, including alpha, against the expected constant RGBA.
-A finite channel passes when:
+Every pixel of render target 0 is checked against expected RGBA `(2.21, 1.0725, 6.9075, 1)`.
+A channel passes when it is finite and:
 
 ```text
 abs(actual - expected) <= 1e-5 + 1e-5 * abs(expected)
 ```
 
-A pixel fails if any RGBA channel is outside tolerance, is NaN, or is infinite. A variant passes only when
-all pixels pass. Pixels left at the clearing sentinel (-999 in all channels) also fail the expected-value test.
-Compilation/linking errors are reported separately as COMPILE_ERROR; they are not numerical passes or failures.
+Any failing channel makes the pixel fail. All pixels must pass for a variant to pass.
+Untouched pixels containing the clearing sentinel also fail the expected-value check.
+The reference is the expected RGBA, not just agreement with the helper variant.
+This check is only appropriate for the minimal constant-color shader, not the original Minecraft output.
 
-This expected-value check is valid only for shaders that output the specified constant color. Do not use this
-revision to assign PASS/FAIL to the original Minecraft shader's final lighting output.
+## Output files and interpretation
 
-## Output files
+### report.txt
 
-### report.txt: start here
+Start here. Contains GPU vendor/renderer and OpenGL/GLSL strings, dimensions/settings, expected RGBA,
+tolerance, compiler/linker messages, per-variant results, and failure counts.
+Each variant reports first-pixel RGBA, failed-pixel count, NaN/Inf counts and maximum finite error.
+The first pixel is illustrative; PASS/FAIL uses all pixels and RGBA channels.
 
-Contains:
+The driver-provided GLSL capability string is not the fragment version selected for the test.
+The GL strings may not contain the full installed driver package version; record that separately if needed.
 
-- GPU vendor, renderer, OpenGL and driver-provided GLSL version strings.
-- Render dimensions and selected legacy test settings.
-- Expected RGBA and tolerance.
-- Per-variant PASS, FAIL or COMPILE_ERROR.
-- First-pixel RGBA, failed-pixel count, NaN/Inf component counts and maximum finite error.
-- Available successful compiler/linker messages and a failure-count summary.
+### results.csv
 
-Example format, illustrative rather than a new execution result:
-
-```text
-Expected RGBA: (2.21, 1.0725, 6.9075, 1)
-literal: FAIL | first RGBA=(0.75, ..., ..., 1) | failed pixels=.../16384 | NaN=0 Inf=0 | max finite error=...
-inline: FAIL | first RGBA=(0.75, ..., ..., 1) | failed pixels=.../16384 | NaN=0 Inf=0 | max finite error=...
-helper: PASS | first RGBA=(2.21, 1.0725, 6.9075, 1) | failed pixels=0/16384 | ...
-uniform: PASS | first RGBA=(2.21, 1.0725, 6.9075, 1) | failed pixels=0/16384 | ...
-```
-
-The driver-provided GLSL capability string is not the selected fragment `#version`. Read the saved shader
-source to identify the actual language version submitted. GL version strings may not include the full
-installed driver package identifier; record that manually when needed.
-
-### results.csv: machine-readable results
-
-One row per variant, not per held-item case or render target.
+One row per variant. There are no duplicate held-item rows or second-target rows.
 
 | Column | Meaning |
 |---|---|
 | variant | literal, inline, helper or uniform |
 | status | PASS, FAIL or COMPILE_ERROR |
-| expected_r / expected_g / expected_b | Expected constant RGB |
-| actual_r0 / actual_g0 / actual_b0 / actual_a0 | First pixel's RGBA; not an average |
+| expected_r / expected_g / expected_b | Expected RGB |
+| actual_r0 / actual_g0 / actual_b0 / actual_a0 | First pixel's RGBA, not an average |
 | failed_pixels | Pixels with at least one failing RGBA channel |
-| nan_components | Number of individual RGBA values containing NaN |
-| inf_components | Number of individual RGBA values containing infinity |
-| max_abs_finite_error | Largest absolute deviation from expected across finite RGBA values |
+| nan_components | Individual RGBA values containing NaN |
+| inf_components | Individual RGBA values containing infinity |
+| max_abs_finite_error | Maximum absolute error among finite channel values |
 
-Expected alpha is always 1.0; it is checked but has no separate expected-alpha CSV column.
-The first pixel is shown for convenience, but PASS/FAIL uses every pixel.
-The maximum finite error excludes nonfinite values; always interpret it together with status and NaN/Inf counts.
-A zero NaN/Inf count does not mean the result is correct. Wrong finite colors also fail.
+Alpha is checked against 1.0 but has no separate expected-alpha column.
+Maximum finite error excludes NaNs/Infs, so read it together with status and invalid-value counts.
 COMPILE_ERROR rows leave numerical fields blank.
+Zero NaNs and infinities does not mean PASS: incorrect finite values also fail.
 
-### Shader evidence
+### Shader source evidence
 
 | File | Meaning |
 |---|---|
-| vertex.vert | Exact embedded vertex source submitted by this run |
-| input_shader.frag | Fragment source loaded before variant generation |
-| literal.frag | Literal-weight fragment source |
-| inline.frag | Inline-clamp fragment source |
-| helper.frag | Helper-function fragment source |
-| uniform.frag | Uniform-weight fragment source, including its added declaration |
+| vertex.vert | Embedded vertex shader submitted for compilation |
+| input_shader.frag | Fragment input before variant generation |
+| literal.frag | Generated literal-weight shader |
+| inline.frag | Generated inline-clamp shader |
+| helper.frag | Generated helper shader |
+| uniform.frag | Generated uniform shader, including the inserted declaration |
 
-Keep these files with each result. They preserve the actual tested version declarations and expressions.
+Keep these with each run. They preserve the version declarations and expressions actually tested.
 
 ### compile_errors.txt
 
-Created only if a shader compilation or program link fails. Identifies the variant and records available
-error details. Successful warnings/messages go into report.txt. The code removes an old compile_errors.txt
-at the start of a run, but does not clean other unrelated/stale files from an existing output directory.
+Created only on shader compilation or program linking failure. Contains variant names and available errors.
+Successful compiler/linker messages go to report.txt. The harness removes an old compile_errors.txt at run
+startup but does not delete unrelated old files. Always prefer a fresh directory.
 
-### Outputs removed from this revision
+### Removed legacy outputs
 
-No summary.csv, comparisons.csv, initializer_checks.csv, environment.txt, raw .rgba32f buffers, per-run
-uniform dumps, or separate successful compile-log files are generated. Their relevant functions are
-replaced by report.txt, results.csv and saved GLSL sources. Old versions of those files in a reused directory
-are not current results; prefer a fresh directory.
+The reporting revision does not generate summary.csv, comparisons.csv, initializer_checks.csv,
+environment.txt, raw .rgba32f buffers, uniform dumps, or separate successful compile-log files.
+Old files in a reused directory are not current results.
+
+## Reading the outcome
+
+| Outcome | Interpretation |
+|---|---|
+| Literal/inline FAIL; helper/uniform PASS | Matches the observed expression-dependent failure |
+| All PASS | Not reproduced in this tested configuration |
+| COMPILE_ERROR | Variant did not execute; investigate the recorded error |
+| All FAIL | Check test assumptions/setup; do not assume a single cause |
+| Header-only CSV or missing variants | Incomplete run, not a pass |
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | All four variants completed and passed |
-| 1 | Fatal setup or runtime error; output may be incomplete |
-| 2 | At least one shader compilation/linking failure; other variants may also have numerical failures |
+| 0 | All variants executed and passed |
+| 1 | Fatal setup/runtime error; output may be incomplete |
+| 2 | At least one compilation/linking failure; numerical failures may also exist |
 | 3 | At least one numerical failure, with no compilation/linking failures |
 
-In Command Prompt, inspect `echo %ERRORLEVEL%` immediately after execution.
-A header-only CSV, missing variant rows or an interrupted report is incomplete evidence, not a successful test.
+Use `echo %ERRORLEVEL%` immediately after execution in Command Prompt.
 
-## Interpreting a run
+## Evidence to retain
 
-- Literal/inline FAIL and helper/uniform PASS: matches the observed expression-dependent failure pattern.
-- All PASS: no reproduction on that tested GPU/driver/program configuration.
-- COMPILE_ERROR: fix or investigate compilation; the affected variant did not render.
-- All FAIL: inspect expected-value assumptions and setup; do not assume the original defect is the only cause.
-- Wrong finite values with no NaNs/Infs: still a valid incorrect-output finding.
-
-The expected RGB is the reference, not merely agreement with the helper. Two variants can agree and still be wrong.
-
-## Evidence to retain for engineering
-
-Keep the complete fresh output directory, the C++ source used to build the executable, exact device identity,
-installed driver package/version, OS/build, and the command line. Use identical sources/settings for cross-GPU
-comparisons. Do not infer a particular compiler pass, register defect or constant-folding root cause solely
-from the numerical failure signature.
+Keep the fresh output directory, `repro.cpp`, the exact command line, precise device/renderer identity,
+installed driver version and OS/build. Preserve the original per-device results when using broader naming.
+Do not infer a specific compiler optimization or universal series-wide failure solely from these tests.
