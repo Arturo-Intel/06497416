@@ -1,476 +1,230 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
-
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <map>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
-
-static const char* lineVertexShaderSrc = R"(
-#version 460 core
-layout (location = 0) in vec2 inPos;
+namespace fs=std::filesystem;
+static const char* vertex = R"GLSL(#version 330 core
 void main() {
-    gl_Position = vec4(inPos, 0.0, 1.0);
+    const vec2 positions[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+    gl_Position = vec4(positions[gl_VertexID], 0, 1);
 }
-)";
-
-static const char* lineFragmentShaderSrc = R"(
-#version 460 core
-out vec4 fragColor;
-void main() {
-    fragColor = vec4(1.0, 1.0, 1.0, 1.0);
+)GLSL";
+std::string read(const fs::path& p){
+ std::ifstream f(p,std::ios::binary); if(!f)throw std::runtime_error("Cannot read "+p.string());
+ return {std::istreambuf_iterator<char>(f),{}};
 }
-)";
-
-static const char* vertexShaderSrc = R"(
-#version 460 core
-layout (location = 0) in vec2 inPos;
-out vec2 vUV;
-
-void main() {
-    vUV = inPos * 0.5 + 0.5;
-    gl_Position = vec4(inPos, 0.0, 1.0);
+void write(const fs::path& p,const std::string& s){
+ std::ofstream f(p,std::ios::binary); if(!f)throw std::runtime_error("Cannot write "+p.string()); f<<s;
 }
-)";
-
-static const char* fragmentShaderBody = R"(
-
-#define PURPLE_END_FIRE_INTERNAL 1
-
-#define XLIGHT_R 1.0
-#define XLIGHT_G 1.0
-#define XLIGHT_B 1.0
-#define FROGLIGHT_SATURATION 1.0
-#define END_ROD_COLOR_PROFILE 0
-#define END_ROD_R 255.0
-#define END_ROD_G 255.0
-#define END_ROD_B 255.0
-#define END_ROD_I 1.0
-#define COLORED_LIGHTING_INTERNAL 0
-#define GLOWING_LICHEN 0
-
-in vec2 vUV;
-out vec4 fragColor;
-
-uniform sampler2D noisetex;
-uniform float frameTimeCounter;
-uniform float uValue;
-uniform int uMat;
-uniform vec3 netherColor;
-
-float clamp01(float x) {
-    return clamp(x, 0.0, 1.0);
+void checkGL(const char* where){
+ GLenum e=glGetError(); if(e!=GL_NO_ERROR){std::ostringstream s;s<<where<<": GL error 0x"<<std::hex<<e;throw std::runtime_error(s.str());}
 }
-
-float pow2(float x) {
-    return x * x;
+GLuint shader(GLenum type,const std::string& src,std::string& logs){
+ GLuint id=glCreateShader(type);const char* p=src.c_str();glShaderSource(id,1,&p,nullptr);glCompileShader(id);
+ GLint ok=0,n=0;glGetShaderiv(id,GL_COMPILE_STATUS,&ok);glGetShaderiv(id,GL_INFO_LOG_LENGTH,&n);
+ if(n>1){std::vector<char>b(n);glGetShaderInfoLog(id,n,nullptr,b.data());logs+=b.data();logs+='\n';}
+ if(!ok){glDeleteShader(id);throw std::runtime_error("Shader compilation failed\n"+logs);}return id;
 }
-
-vec3 pow2(vec3 x) {
-    return x * x;
+GLuint program(const std::string& frag,std::string& logs){
+ GLuint vs=0,ps=0,p=0;
+ try{
+ vs=shader(GL_VERTEX_SHADER,vertex,logs);ps=shader(GL_FRAGMENT_SHADER,frag,logs);
+ p=glCreateProgram();glAttachShader(p,vs);glAttachShader(p,ps);glLinkProgram(p);
+ GLint ok=0,n=0;glGetProgramiv(p,GL_LINK_STATUS,&ok);glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n);
+ if(n>1){std::vector<char>b(n);glGetProgramInfoLog(p,n,nullptr,b.data());logs+=b.data();logs+='\n';}
+ if(!ok)throw std::runtime_error("Program link failed\n"+logs);
+ glDeleteShader(vs);glDeleteShader(ps);return p;
+ }catch(...){if(vs)glDeleteShader(vs);if(ps)glDeleteShader(ps);if(p)glDeleteProgram(p);throw;}
 }
-
-float GetLuminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+std::string variant(std::string s,const std::string& weight,const std::string& mode){
+ const std::string name="vec3 torchBlockSpecialLightColor";
+ size_t begin=s.find(name);if(begin==std::string::npos||s.find(name,begin+name.size())!=std::string::npos)
+ throw std::runtime_error("Expected exactly one torch initializer");
+ size_t end=s.find(';',begin),pos=s.find("0.75f",begin);
+ if(end==std::string::npos||pos==std::string::npos||pos>end)throw std::runtime_error("Unexpected torch initializer");
+ const std::map<std::string,std::string> weights={{"literal","0.75f"},{"inline","clamp(0.75f, 0.0f, 1.0f)"},{"helper","clamp01(0.75f)"},{"uniform","reproWeight"}};
+ if(weight!="literal")s.replace(pos,5,weights.at(weight));
+ if(weight=="uniform"){auto nl=s.find('\n');if(nl==std::string::npos)throw std::runtime_error("No version line");s.insert(nl+1,"uniform float reproWeight = 0.75f;\n");}
+ if(mode!="full"){
+ auto m=s.find("void main()");if(m==std::string::npos)throw std::runtime_error("Original main not found");
+ s.replace(m,11,"void original_main()");
+ std::string expr=mode=="initializer"?"torchBlockSpecialLightColor":"GetSpecialBlocklightColor(heldItemId - 44000).rgb";
+ s+="\nvoid main(){iris_FragData0=vec4("+expr+",1.0);iris_FragData1=vec4(0.0);}\n";
+ }return s;
 }
-
-vec3 getRainbowColor(vec2 p, float t) {
-    return 0.5 + 0.5 * cos(vec3(0.0, 2.0943951, 4.1887902) + t + p.xyx * 0.0);
+using Values=std::map<std::string,std::vector<float>>;
+void uniforms(GLuint p,int size,int held,int frame,float angle,float seconds,int material,const fs::path& log){
+ Values values={
+ {"iris_FogStart",{0}},{"iris_FogEnd",{256}},{"near",{0.1f}},{"far",{256}},
+ {"viewWidth",{float(size)}},{"viewHeight",{float(size)}},{"viewSize",{float(size),float(size)}},
+ {"texelSize",{1.f/size,1.f/size}},{"aspectRatio",{1}},{"screenBrightness",{0.5f}},
+ {"sunAngle",{angle}},{"eyeAltitude",{64}},{"fogColor",{0.2f,0.3f,0.4f}},
+ {"skyColor",{0.3f,0.4f,0.6f}},{"iris_FogColor",{0.2f,0.3f,0.4f,1}},
+ {"heldItemId",{float(held)}},{"heldItemId2",{44003}},{"heldBlockLightValue",{15}},
+ {"heldBlockLightValue2",{0}},{"frameCounter",{float(frame)}},{"frameTimeCounter",{seconds}},
+ {"frameTime",{1.f/60}},{"reproWeight",{0.75f}},{"reproMaterial",{float(material)}},
+ {"reproLightmap",{0.6f,0.5f}},{"inVanillaEnd",{1}},{"inNetherWastes",{1}},
+ {"isSneaking",{1}},{"isShockwave",{1}},{"atlasSize",{2,2}}};
+ GLint count=0,maxlen=0;glGetProgramiv(p,GL_ACTIVE_UNIFORMS,&count);glGetProgramiv(p,GL_ACTIVE_UNIFORM_MAX_LENGTH,&maxlen);
+ std::ostringstream f; (void)log; f<<"name,type,value\n";std::vector<char> buf(std::max(maxlen,1));
+ for(GLint i=0;i<count;++i){GLsizei len=0;GLint array=0;GLenum type=0;
+ glGetActiveUniform(p,i,GLsizei(buf.size()),&len,&array,&type,buf.data());std::string name(buf.data(),len);
+ GLint loc=glGetUniformLocation(p,name.c_str());if(loc<0)continue;
+ if(array!=1)throw std::runtime_error("Unsupported uniform array: "+name);
+ int n=1;bool integer=false;std::vector<float> v;
+ switch(type){
+ case GL_SAMPLER_2D:v={0};integer=true;break;
+ case GL_SAMPLER_2D_SHADOW:v={1};integer=true;break;
+ case GL_SAMPLER_3D:v={2};integer=true;break;
+ case GL_UNSIGNED_INT_SAMPLER_3D:v={3};integer=true;break;
+ case GL_FLOAT_MAT3:case GL_FLOAT_MAT4:{
+ int side=type==GL_FLOAT_MAT3?3:4;v.assign(side*side,0);for(int k=0;k<side;++k)v[k*side+k]=1;
+ if(side==3)glUniformMatrix3fv(loc,1,GL_FALSE,v.data());else glUniformMatrix4fv(loc,1,GL_FALSE,v.data());break;}
+ case GL_FLOAT:break;
+ case GL_FLOAT_VEC2:n=2;break;case GL_FLOAT_VEC3:n=3;break;case GL_FLOAT_VEC4:n=4;break;
+ case GL_INT:case GL_BOOL:integer=true;break;
+ case GL_INT_VEC2:n=2;integer=true;break;case GL_INT_VEC3:n=3;integer=true;break;
+ default:throw std::runtime_error("Unsupported uniform: "+name);
+ }
+ bool matrix=type==GL_FLOAT_MAT3||type==GL_FLOAT_MAT4;
+ if(!matrix){
+ if(v.empty()){auto it=values.find(name);v=it==values.end()?std::vector<float>(n,0):it->second;}
+ if(int(v.size())!=n)throw std::runtime_error("Uniform dimension mismatch: "+name);
+ if(integer){std::array<GLint,4>a{};for(int j=0;j<n;++j)a[j]=GLint(v[j]);
+ switch(n){case 1:glUniform1iv(loc,1,a.data());break;case 2:glUniform2iv(loc,1,a.data());break;case 3:glUniform3iv(loc,1,a.data());break;case 4:glUniform4iv(loc,1,a.data());break;}}
+ else switch(n){case 1:glUniform1fv(loc,1,v.data());break;case 2:glUniform2fv(loc,1,v.data());break;case 3:glUniform3fv(loc,1,v.data());break;case 4:glUniform4fv(loc,1,v.data());break;}
+ }
+ f<<name<<','<<type<<",\"";for(float x:v)f<<std::setprecision(9)<<x<<' ';f<<"\"\n";
+ }checkGL("uniform setup");
 }
-
-void AddSpecialLightDetail(inout vec3 light, vec3 albedo, float emission) {
-    vec3 lightM = max(light, vec3(0.0));
-    lightM /= (0.2 + 0.8 * GetLuminance(lightM));
-    lightM *= (1.0 / (1.0 + emission)) * 0.22;
-    light *= 0.9;
-    light += pow2(lightM / (albedo + 0.1));
+GLuint inputTexture(int unit,GLenum target,GLint internal,GLenum format,GLenum type,const void* data,bool compare=false){
+ GLuint t;glGenTextures(1,&t);glActiveTexture(GL_TEXTURE0+unit);glBindTexture(target,t);
+ if(target==GL_TEXTURE_3D)glTexImage3D(target,0,internal,2,2,2,0,format,type,data);
+ else glTexImage2D(target,0,internal,2,2,0,format,type,data);
+ glTexParameteri(target,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(target,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+ glTexParameteri(target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+ if(target==GL_TEXTURE_3D)glTexParameteri(target,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);
+ if(compare){glTexParameteri(target,GL_TEXTURE_COMPARE_MODE,GL_COMPARE_REF_TO_TEXTURE);glTexParameteri(target,GL_TEXTURE_COMPARE_FUNC,GL_LEQUAL);}
+ return t;
 }
-
-vec4 GetSpecialBlocklightColor(int mat) {
-#ifdef SOUL_SAND_VALLEY_OVERHAUL_INTERNAL
-    vec3 blocklightCol = mix(vec3(0.1775, 0.108, 0.0775) * vec3(XLIGHT_R, XLIGHT_G, XLIGHT_B),
-                             vec3(0.05, 0.22, 0.25), 1.0);
-    float inSoulValley = 1.0;
-    vec3 fireSpecialLightColorGradient = mix(vec3(2.0, 0.87, 0.27) * 3.8,
-                                             mix(vec3(2.5, 0.87, 0.27), vec3(0.5, 1.9, 2.1) * 3.8, 0.3),
-                                             inSoulValley);
-    vec3 torchBlockSpecialLightColor = mix(vec3(2.0, 0.87, 0.27) * 3.8,
-                                           mix(vec3(2.5, 0.87, 0.27), vec3(0.5, 1.9, 2.1) * 3.8, 0.5),
-                                           inSoulValley);
-    vec3 lanternBlockSpecialLightColor = mix(vec3(2.0, 0.87, 0.27) * 3.8,
-                                             mix(vec3(2.5, 0.87, 0.27), vec3(0.5, 1.9, 2.1) * 3.8, 0.4),
-                                             inSoulValley);
-    vec3 fireSpecialLightColor = mix(vec3(2.0, 0.87, 0.27) * 3.8,
-                                     vec3(0.5, 1.9, 2.1) * 3.8,
-                                     inSoulValley);
-    vec4 lavaSpecialLightColor = vec4(mix(vec3(3.0, 0.9, 0.2) * 4.0,
-                                          vec3(0.5, 1.9, 2.1) * 4.0,
-                                          inSoulValley), 0.0);
-    vec4 brewingStandSpecialLightColor = vec4(mix(vec3(2.5, 1.2, 0.4) * 0.1,
-                                                  vec3(0.5, 1.9, 2.1) * 0.1,
-                                                  inSoulValley), 0.1);
-#elif defined(PURPLE_END_FIRE_INTERNAL)
-    vec3 blocklightCol = vec3(0.1775, 0.108, 0.0775) * vec3(XLIGHT_R, XLIGHT_G, XLIGHT_B);
-
-    vec3 fireSpecialLightColor = vec3(0.6, 0.3, 2.4) * 3.8;
-    vec3 fireSpecialLightColorGradient = mix(
-        vec3(2.0, 0.77, 0.17) * 3.8,
-        fireSpecialLightColor,
-        clamp01(0.7 + max(0.0, clamp01(sin(pow2(texture(noisetex, vec2(frameTimeCounter * 0.01, 0.0)).r)))))
-    );
-
-    #if TORCH_WEIGHT_MODE == 0
-        vec3 torchBlockSpecialLightColor = mix(vec3(2.0, 0.87, 0.27), fireSpecialLightColor, 0.75);
-    #elif TORCH_WEIGHT_MODE == 1
-        vec3 torchBlockSpecialLightColor = mix(vec3(2.0, 0.87, 0.27), fireSpecialLightColor, clamp01(0.75));
-    #else
-        vec3 torchBlockSpecialLightColor = mix(vec3(2.0, 0.87, 0.27), fireSpecialLightColor, uValue);
-    #endif
-
-    vec3 lanternBlockSpecialLightColor = fireSpecialLightColor;
-    vec4 lavaSpecialLightColor = vec4(vec3(1.0, 0.5, 4.0) * 4.0, 0.5);
-    vec4 brewingStandSpecialLightColor = vec4(vec3(0.10, 0.05, 0.4) * 0.4, 0.1);
-#else
-    vec3 blocklightCol = vec3(0.1775, 0.108, 0.0775) * vec3(XLIGHT_R, XLIGHT_G, XLIGHT_B);
-    vec3 fireSpecialLightColor = vec3(2.0, 0.87, 0.27) * 3.8;
-    vec3 fireSpecialLightColorGradient = fireSpecialLightColor;
-    vec3 torchBlockSpecialLightColor = fireSpecialLightColor;
-    vec3 lanternBlockSpecialLightColor = fireSpecialLightColor;
-    vec4 lavaSpecialLightColor = vec4(vec3(3.0, 0.9, 0.2) * 4.0, 0.0);
-    vec4 brewingStandSpecialLightColor = vec4(vec3(2.5, 1.2, 0.4) * 0.1, 0.1);
-#endif
-
-#if defined(NETHER) && defined(BIOME_COLORED_NETHER_PORTALS)
-    vec3 netherPortalSpecialLightColor = normalize(netherColor) * 2.0;
-    vec3 respawnAnchorSpecialLightColor = normalize(netherColor) * 2.0;
-#else
-    vec3 netherPortalSpecialLightColor = vec3(1.8, 0.4, 2.2) * 0.8;
-    vec3 respawnAnchorSpecialLightColor = vec3(1.7, 0.9, 0.4) * 2.0;
-#endif
-
-    vec3 redstoneSpecialLightColor = vec3(4.0, 0.1, 0.1);
-    vec4 soulFireSpecialColor = vec4(vec3(0.3, 2.0, 2.2) * 1.0, 0.3);
-    float candleColorMult = 2.0;
-    float candleExtraLight = 0.004;
-
-#if END_ROD_COLOR_PROFILE == 1
-    vec3 endRodSpacialColor = vec3(END_ROD_R, END_ROD_G, END_ROD_B) / 255.0 * END_ROD_I;
-#elif (END_ROD_COLOR_PROFILE == 2 || END_ROD_COLOR_PROFILE == 3) && COLORED_LIGHTING_INTERNAL > 0
-    vec3 endRodSpacialColor = vec3(pow2(getRainbowColor(vec2(0.0), 0.0)));
-#else
-    vec3 endRodSpacialColor = vec3(1.0, 1.0, 1.0);
-#endif
-
-    vec3 enchantingTableSpecialLightColor = vec3(1.4, 1.1, 0.5);
-
-    if (mat < 50) {
-        if (mat < 26) {
-            if (mat < 14) {
-                if (mat < 8) {
-                    if (mat == 2) return vec4(torchBlockSpecialLightColor, 0.0);
-                    if (mat == 3) return vec4(endRodSpacialColor * 4.0, 0.0);
-                    if (mat == 4) return vec4(vec3(1.0, 1.5, 2.0) * 3.0, 0.0);
-                    if (mat == 5) return vec4(fireSpecialLightColorGradient, 0.0);
-                    if (mat == 6) return vec4(vec3(0.7, 1.5, 1.5) * 1.7, 0.0);
-                    if (mat == 7) return vec4(pow(vec3(1.1, 0.85, 0.35), vec3(FROGLIGHT_SATURATION * 0.5 + 0.5)) * 5.0, 0.0);
-                } else {
-                    if (mat == 8)  return vec4(pow(vec3(0.6, 1.3, 0.6), vec3(FROGLIGHT_SATURATION * 0.5 + 0.5)) * 4.5, 0.0);
-                    if (mat == 9)  return vec4(pow(vec3(1.1, 0.5, 0.9), vec3(FROGLIGHT_SATURATION * 0.5 + 0.5)) * 4.5, 0.0);
-                    if (mat == 10) return vec4(vec3(1.7, 0.9, 0.4) * 4.0, 0.0);
-                    if (mat == 11) return vec4(fireSpecialLightColor, 0.0);
-                    if (mat == 12) return vec4(lanternBlockSpecialLightColor, 0.0);
-                    if (mat == 13) return lavaSpecialLightColor;
-                }
-            } else {
-                if (mat < 20) {
-                    if (mat == 14) return vec4(lavaSpecialLightColor.rgb, 0.0);
-                    if (mat == 15) return vec4(fireSpecialLightColorGradient, 0.0);
-                    if (mat == 16) return vec4(vec3(1.7, 0.9, 0.4) * 4.0, 0.0);
-                    if (mat == 17) return vec4(respawnAnchorSpecialLightColor, 0.0);
-                    if (mat == 18) return vec4(vec3(1.0, 1.25, 1.5) * 3.4, 0.0);
-                    if (mat == 19) return vec4(vec3(3.0, 0.9, 0.2) * 3.0, 0.0);
-                } else {
-                    if (mat == 20) return vec4(vec3(2.3, 0.9, 0.2) * 3.4, 0.0);
-                    if (mat == 21) return vec4(fireSpecialLightColor * 0.7, 0.0);
-                    if (mat == 22) return vec4(fireSpecialLightColor * 0.7, 0.0);
-                    if (mat == 23) return vec4(fireSpecialLightColor * 0.7, 0.0);
-                    if (mat == 24) return vec4(fireSpecialLightColor * 0.25 * candleColorMult, candleExtraLight);
-                    if (mat == 25) return vec4(netherPortalSpecialLightColor * 2.0, 0.4);
-                }
-            }
-        } else {
-            if (mat < 38) {
-                if (mat < 32) {
-                    if (mat == 26) return vec4(netherPortalSpecialLightColor, 0.0);
-                    if (mat == 27) return soulFireSpecialColor;
-                    if (mat == 28) return soulFireSpecialColor;
-                    if (mat == 29) return soulFireSpecialColor;
-                    if (mat == 30) return soulFireSpecialColor;
-                    if (mat == 31) return vec4(redstoneSpecialLightColor * 0.5, 0.1);
-                } else {
-                    if (mat == 32) return vec4(redstoneSpecialLightColor * 0.3, 0.1);
-                    if (mat == 33) return vec4(enchantingTableSpecialLightColor, 0.0);
-                    if (mat == 34) return vec4(vec3(0.4, 0.55, 0.55), 0.0);
-                    if (mat == 35) return vec4(redstoneSpecialLightColor * 0.25, 0.0);
-                    if (mat == 36) return vec4(vec3(0.325, 0.15, 0.425) * 2.0, 0.05);
-                    if (mat == 37) return vec4(lavaSpecialLightColor.rgb * 0.1, 0.1);
-                }
-            } else {
-                if (mat < 44) {
-                    if (mat == 39) return vec4(vec3(2.0, 1.0, 1.5) * 0.25, 0.1);
-                    if (mat == 40) return brewingStandSpecialLightColor;
-                    if (mat == 41) return vec4(redstoneSpecialLightColor * 0.4, 0.15);
-                    if (mat == 42) return vec4(vec3(0.75, 0.75, 3.0) * 0.277, 0.15);
-                    if (mat == 43) return vec4(vec3(1.7, 0.9, 0.4) * 0.45, 0.05);
-                } else {
-                    if (mat == 44) return vec4(vec3(1.7, 1.1, 0.2) * 0.45, 0.1);
-                    if (mat == 45) return vec4(vec3(1.7, 0.8, 0.4) * 0.45, 0.05);
-                    if (mat == 46) return vec4(vec3(0.75, 0.75, 3.0) * 0.2, 0.1);
-                    if (mat == 47) return vec4(vec3(0.5, 3.5, 0.5) * 0.3, 0.1);
-                    if (mat == 48) return vec4(vec3(0.5, 2.0, 2.0) * 0.4, 0.15);
-                    if (mat == 49) return vec4(vec3(1.5, 1.5, 1.5) * 0.3, 0.05);
-                }
-            }
-        }
-    }
-
-    return vec4(blocklightCol * 20.0, 0.0);
+int execute(int argc,char**argv){
+ fs::path sourcePath="minimal330.frag",output="results";int size=128,frame=0,material=10001;float angle=.25f,seconds=1;bool visible=false;std::string only="full";
+ for(int i=1;i<argc;++i){std::string a=argv[i];auto next=[&](){if(++i>=argc)throw std::runtime_error("Missing value for "+a);return std::string(argv[i]);};
+ if(a=="--shader")sourcePath=next();else if(a=="--out")output=next();else if(a=="--size")size=std::stoi(next());
+ else if(a=="--mode")only=next();else if(a=="--frame")frame=std::stoi(next());else if(a=="--sun-angle")angle=std::stof(next());
+ else if(a=="--time")seconds=std::stof(next());else if(a=="--material")material=std::stoi(next());else if(a=="--visible")visible=true;
+ else if(a=="--help"){std::cout<<"mix_repro [--shader minimal330.frag] [--out results] [--size 128] [--mode full] [--frame 0] [--sun-angle .25] [--time 1] [--material 10001] [--visible]\n";return 0;}
+ else throw std::runtime_error("Unknown option: "+a);}
+ if(size<1||size>4096)throw std::runtime_error("Size must be 1..4096");
+ if(only!="full")throw std::runtime_error("This minimal-color test supports --mode full only");
+ std::string source=read(sourcePath);fs::create_directories(output);
+ fs::remove(output/"compile_errors.txt");
+ glfwSetErrorCallback([](int code,const char* text){std::cerr<<"GLFW "<<code<<": "<<text<<'\n';});
+ if(!glfwInit())throw std::runtime_error("glfwInit failed");
+ struct Cleanup{GLFWwindow* w=nullptr;~Cleanup(){if(w)glfwDestroyWindow(w);glfwTerminate();}}cleanup;
+ glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4);glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,6);glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
+ glfwWindowHint(GLFW_VISIBLE,visible?GLFW_TRUE:GLFW_FALSE);
+ cleanup.w=glfwCreateWindow(size,size,"Minecraft mix reproducer",nullptr,nullptr);
+ if(!cleanup.w)throw std::runtime_error("OpenGL 3.3 context creation failed");glfwMakeContextCurrent(cleanup.w);
+ glewExperimental=GL_TRUE;GLenum ge=glewInit();if(ge!=GLEW_OK)throw std::runtime_error(reinterpret_cast<const char*>(glewGetErrorString(ge)));
+ while(glGetError()!=GL_NO_ERROR){} // GLEW may leave an error during core-context initialization.
+ std::ofstream meta(output/"report.txt");
+ if(!meta)throw std::runtime_error("Cannot create report.txt");
+ for(auto entry:std::vector<std::pair<std::string,GLenum>>{{"Vendor",GL_VENDOR},{"Renderer",GL_RENDERER},{"OpenGL",GL_VERSION},{"GLSL",GL_SHADING_LANGUAGE_VERSION}}){
+ const auto* p=glGetString(entry.second);std::string value=p?reinterpret_cast<const char*>(p):"unknown";meta<<entry.first<<": "<<value<<'\n';std::cout<<entry.first<<": "<<value<<'\n';}
+ meta<<"Synthetic inputs, not Minecraft capture replay\nSize: "<<size<<" x "<<size<<"\nFrame: "<<frame<<"\nSun angle: "<<angle<<"\nTime: "<<seconds<<"\nMaterial: "<<material<<'\n';
+ write(output/"input_shader.frag",source);write(output/"vertex.vert",vertex);
+ GLuint vao;glGenVertexArrays(1,&vao);glBindVertexArray(vao);
+ std::vector<float> color(16,.5f),depth(4,1),volume(32,.04f);std::vector<uint32_t> ids(8,2);
+ std::array<GLuint,4> inputs={inputTexture(0,GL_TEXTURE_2D,GL_RGBA32F,GL_RGBA,GL_FLOAT,color.data()),
+ inputTexture(1,GL_TEXTURE_2D,GL_DEPTH_COMPONENT32F,GL_DEPTH_COMPONENT,GL_FLOAT,depth.data(),true),
+ inputTexture(2,GL_TEXTURE_3D,GL_RGBA32F,GL_RGBA,GL_FLOAT,volume.data()),
+ inputTexture(3,GL_TEXTURE_3D,GL_R32UI,GL_RED_INTEGER,GL_UNSIGNED_INT,ids.data())};
+ glActiveTexture(GL_TEXTURE4);GLuint fbo;glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);
+ std::array<GLuint,2> targets;glGenTextures(2,targets.data());
+ for(int i=0;i<2;++i){glBindTexture(GL_TEXTURE_2D,targets[i]);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA32F,size,size,0,GL_RGBA,GL_FLOAT,nullptr);
+ glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+ glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0+i,GL_TEXTURE_2D,targets[i],0);}
+ const GLenum buffers[]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1};glDrawBuffers(2,buffers);
+ if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Float framebuffer incomplete");
+ glViewport(0,0,size,size);for(GLenum state:{GL_BLEND,GL_DEPTH_TEST,GL_CULL_FACE,GL_SCISSOR_TEST,GL_DITHER,GL_FRAMEBUFFER_SRGB})glDisable(state);
+ glPixelStorei(GL_PACK_ALIGNMENT,1);checkGL("resource setup");
+ // This executable validates ONLY fragment shaders that output the expected constant color.
+ std::ofstream csv(output/"results.csv");
+ if(!csv)throw std::runtime_error("Cannot create results.csv");
+ csv<<"variant,status,expected_r,expected_g,expected_b,actual_r0,actual_g0,actual_b0,actual_a0,failed_pixels,nan_components,inf_components,max_abs_finite_error\n";
+ const std::array<double,4> expected={2.21,1.0725,6.9075,1.0};
+ meta<<"\nTest: direct constant-color output, all pixels and all RGBA channels\n"
+     <<"Expected RGBA: (2.21, 1.0725, 6.9075, 1)\n"
+     <<"Tolerance: abs_error <= 1e-5 + 1e-5 * abs(expected)\n\n";
+ std::cout<<"Expected RGBA: (2.21, 1.0725, 6.9075, 1)\n";
+ int compileFailures=0,failedVariants=0;
+ std::ofstream errors;
+ for(const std::string weight:{"literal","inline","helper","uniform"}){
+     std::string frag=variant(source,weight,"full"),logs;
+     write(output/(weight+".frag"),frag);
+     GLuint p=0;
+     try { p=program(frag,logs); }
+     catch(const std::exception& e){
+         if(!errors.is_open())errors.open(output/"compile_errors.txt",std::ios::trunc);
+         errors<<weight<<":\n"<<e.what()<<"\n\n";
+         csv<<weight<<",COMPILE_ERROR,,,,,,,,,,,\n";
+         meta<<weight<<": COMPILE_ERROR (see compile_errors.txt)\n";
+         std::cerr<<weight<<": COMPILE_ERROR\n";
+         ++compileFailures;continue;
+     }
+     if(!logs.empty())meta<<weight<<" compiler/linker messages:\n"<<logs<<'\n';
+     glUseProgram(p);
+     // Retain the previous input setup, but do not generate uniform dump files.
+     uniforms(p,size,44002,frame,angle,seconds,material,{});
+     const GLfloat clear[]={-999,-999,-999,-999};
+     glClearBufferfv(GL_COLOR,0,clear);glClearBufferfv(GL_COLOR,1,clear);
+     glDrawArrays(GL_TRIANGLES,0,3);glFinish();checkGL("draw");
+     std::vector<float> pixels(size_t(size)*size*4);
+     glReadBuffer(GL_COLOR_ATTACHMENT0);
+     glReadPixels(0,0,size,size,GL_RGBA,GL_FLOAT,pixels.data());checkGL("readback");
+     size_t failedPixels=0,nans=0,infs=0;double maxError=0;
+     for(size_t i=0;i<pixels.size();i+=4){
+         bool bad=false;
+         for(size_t c=0;c<4;++c){
+             double x=pixels[i+c];
+             if(std::isnan(x)){++nans;bad=true;}
+             else if(std::isinf(x)){++infs;bad=true;}
+             else {
+                 double error=std::abs(x-expected[c]);maxError=std::max(maxError,error);
+                 if(error>1e-5+1e-5*std::abs(expected[c]))bad=true;
+             }
+         }
+         if(bad)++failedPixels;
+     }
+     std::string status=failedPixels?"FAIL":"PASS";
+     if(failedPixels)++failedVariants;
+     csv<<std::setprecision(10)<<weight<<','<<status<<",2.21,1.0725,6.9075";
+     for(size_t c=0;c<4;++c)csv<<','<<pixels[c];
+     csv<<','<<failedPixels<<','<<nans<<','<<infs<<','<<maxError<<'\n';
+     std::ostringstream line;
+     line<<std::setprecision(10)<<weight<<": "<<status
+         <<" | first RGBA=("<<pixels[0]<<", "<<pixels[1]<<", "<<pixels[2]<<", "<<pixels[3]<<")"
+         <<" | failed pixels="<<failedPixels<<'/'<<size_t(size)*size
+         <<" | NaN="<<nans<<" Inf="<<infs<<" | max finite error="<<maxError;
+     meta<<line.str()<<'\n';std::cout<<line.str()<<'\n';
+     glDeleteProgram(p);
+ }
+ meta<<"\nSummary: "<<failedVariants<<" numerical failures, "<<compileFailures<<" compilation failures\n";
+ meta<<"Exit codes: 0=all pass, 1=fatal error, 2=compilation failure, 3=numerical failure\n";
+ glDeleteTextures(4,inputs.data());glDeleteTextures(2,targets.data());glDeleteFramebuffers(1,&fbo);glDeleteVertexArrays(1,&vao);
+ std::cout<<"Results: "<<output<<'\n';return compileFailures?2:(failedVariants?3:0);
 }
-
-void main() {
-    vec3 color = GetSpecialBlocklightColor(uMat).rgb / 2.0;
-
-    if (any(isnan(color)) || any(isinf(color))) {
-        color = vec3(1.0, 0.0, 1.0);
-    }
-
-    fragColor = vec4(color, 1.0);
-}
-)";
-
-GLuint compileShaderFromStrings(GLenum type, const std::vector<std::string>& srcParts) {
-    GLuint shader = glCreateShader(type);
-
-    std::vector<const GLchar*> ptrs;
-    ptrs.reserve(srcParts.size());
-    for (const auto& s : srcParts) {
-        ptrs.push_back(s.c_str());
-    }
-
-    glShaderSource(shader, (GLsizei)ptrs.size(), ptrs.data(), nullptr);
-    glCompileShader(shader);
-
-    GLint ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        GLint logLen = 0;
-        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLen);
-        std::string log(logLen > 1 ? logLen : 1, '\0');
-        glGetShaderInfoLog(shader, logLen, nullptr, &log[0]);
-        std::cerr << "Shader compile failed:\n" << log << std::endl;
-    }
-
-    return shader;
-}
-
-GLuint linkProgram(GLuint vs, GLuint fs) {
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-
-    GLint ok = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        GLint logLen = 0;
-        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &logLen);
-        std::string log(logLen > 1 ? logLen : 1, '\0');
-        glGetProgramInfoLog(prog, logLen, nullptr, &log[0]);
-        std::cerr << "Program link failed:\n" << log << std::endl;
-    }
-
-    return prog;
-}
-
-GLuint buildFragmentVariant(int mode) {
-    std::string prefix =
-        "#version 460 core\n"
-        "#define TORCH_WEIGHT_MODE " + std::to_string(mode) + "\n";
-
-    std::vector<std::string> parts = {
-        prefix,
-        fragmentShaderBody
-    };
-
-    return compileShaderFromStrings(GL_FRAGMENT_SHADER, parts);
-}
-
-GLuint createProgramVariant(GLuint sharedVS, int mode) {
-    GLuint fs = buildFragmentVariant(mode);
-    GLuint prog = linkProgram(sharedVS, fs);
-    glDeleteShader(fs);
-    return prog;
-}
-
-GLuint createNoiseTexture() {
-    const int W = 64;
-    const int H = 64;
-    std::vector<unsigned char> data(W * H);
-
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
-            float v = std::sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
-            v = v - std::floor(v);
-            data[y * W + x] = (unsigned char)(v * 255.0f);
-        }
-    }
-
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, W, H, 0, GL_RED, GL_UNSIGNED_BYTE, data.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return tex;
-}
-
-void setCommonUniforms(GLuint prog, GLuint noiseTex, float timeSec, float uValue, int uMat) {
-    glUseProgram(prog);
-
-    GLint noiseLoc = glGetUniformLocation(prog, "noisetex");
-    GLint timeLoc = glGetUniformLocation(prog, "frameTimeCounter");
-    GLint valueLoc = glGetUniformLocation(prog, "uValue");
-    GLint matLoc = glGetUniformLocation(prog, "uMat");
-    GLint netherColorLoc = glGetUniformLocation(prog, "netherColor");
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, noiseTex);
-
-    if (noiseLoc >= 0) glUniform1i(noiseLoc, 0);
-    if (timeLoc >= 0) glUniform1f(timeLoc, timeSec);
-    if (valueLoc >= 0) glUniform1f(valueLoc, uValue);
-    if (matLoc >= 0) glUniform1i(matLoc, uMat);
-    if (netherColorLoc >= 0) glUniform3f(netherColorLoc, 1.0f, 0.3f, 1.2f);
-}
-
-int main() {
-    if (!glfwInit()) {
-        std::cerr << "glfwInit failed\n";
-        return -1;
-    }
-
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-    GLFWwindow* win = glfwCreateWindow(1440, 720, "mix repro variants", nullptr, nullptr);
-    if (!win) {
-        std::cerr << "glfwCreateWindow failed\n";
-        glfwTerminate();
-        return -1;
-    }
-
-    glfwMakeContextCurrent(win);
-
-    glewExperimental = GL_TRUE;
-    GLenum glewErr = glewInit();
-    if (glewErr != GLEW_OK) {
-        std::cerr << "GLEW init failed: "
-                  << reinterpret_cast<const char*>(glewGetErrorString(glewErr))
-                  << std::endl;
-        glfwDestroyWindow(win);
-        glfwTerminate();
-        return -1;
-    }
-
-    GLuint vs = compileShaderFromStrings(GL_VERTEX_SHADER, { std::string(vertexShaderSrc) });
-
-    GLuint progLiteral = createProgramVariant(vs, 0);
-    GLuint progHelper = createProgramVariant(vs, 1);
-    GLuint progUniform = createProgramVariant(vs, 2);
-
-    glDeleteShader(vs);
-
-    GLuint lineVS = compileShaderFromStrings(GL_VERTEX_SHADER, { std::string(lineVertexShaderSrc) });
-    GLuint lineFS = compileShaderFromStrings(GL_FRAGMENT_SHADER, { std::string(lineFragmentShaderSrc) });
-    GLuint lineProg = linkProgram(lineVS, lineFS);
-    glDeleteShader(lineVS);
-    glDeleteShader(lineFS);
-
-    float quad[] = {
-        -1.0f, -1.0f,
-         1.0f, -1.0f,
-        -1.0f,  1.0f,
-         1.0f,  1.0f
-    };
-
-    GLuint vao = 0, vbo = 0;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    GLuint noiseTex = createNoiseTexture();
-
-    glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
-
-    while (!glfwWindowShouldClose(win)) {
-        int w = 0, h = 0;
-        glfwGetFramebufferSize(win, &w, &h);
-
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        float t = (float)glfwGetTime();
-        const int mat = 2;
-
-        int panelW = w / 3;
-        int lineW = 4;
-
-        glBindVertexArray(vao);
-
-        glViewport(0, 0, panelW, h);
-        setCommonUniforms(progLiteral, noiseTex, t, 0.75f, mat);
-        glUseProgram(progLiteral);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        glViewport(panelW, 0, panelW, h);
-        setCommonUniforms(progHelper, noiseTex, t, 0.75f, mat);
-        glUseProgram(progHelper);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        glViewport(2 * panelW, 0, w - 2 * panelW, h);
-        setCommonUniforms(progUniform, noiseTex, t, 0.75f, mat);
-        glUseProgram(progUniform);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        glUseProgram(lineProg);
-
-        glViewport(panelW - lineW / 2, 0, lineW, h);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        glViewport(2 * panelW - lineW / 2, 0, lineW, h);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        glfwSwapBuffers(win);
-        glfwPollEvents();
-    }
-
-    glDeleteTextures(1, &noiseTex);
-    glDeleteBuffers(1, &vbo);
-    glDeleteVertexArrays(1, &vao);
-    glDeleteProgram(progLiteral);
-    glDeleteProgram(progHelper);
-    glDeleteProgram(progUniform);
-    glDeleteProgram(lineProg);
-
-    glfwDestroyWindow(win);
-    glfwTerminate();
-    return 0;
-}
+int main(int argc,char** argv){try{return execute(argc,argv);}catch(const std::exception& e){std::cerr<<"Fatal: "<<e.what()<<'\n';return 1;}}
